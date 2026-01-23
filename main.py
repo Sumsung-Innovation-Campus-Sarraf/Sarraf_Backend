@@ -1,10 +1,10 @@
 """
 FastAPI Backend for Gold and USD/DZD Forecasting
 """
-
+from datetime import date
 from fastapi import FastAPI, HTTPException, Depends, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import os
@@ -85,7 +85,6 @@ class GoldHealthResponse(BaseModel):
 
 # USD/DZD Models
 class USDForecastRequest(BaseModel):
-    date: str  # Format: YYYY-MM-DD
     use_cached: bool = True
     model_type: str = "level"  # "level" or "change"
 
@@ -426,7 +425,7 @@ async def get_gold_price_history(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/predict", response_model=GoldPredictionResponse)
+@app.post("/predict_gold", response_model=GoldPredictionResponse)
 async def make_gold_prediction(request: GoldPredictionRequest = None):
     """Make a gold direction prediction"""
     try:
@@ -531,8 +530,177 @@ async def gold_test_endpoint():
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
+#=================== Silver ENDPOINTS ====================
+# ==================== SILVER ENDPOINTS ====================
 
-# ==================== USD/DZD ENDPOINTS ====================
+# Silver Dependencies
+SILVER_FEATURE_CALCULATOR = None
+
+def get_silver_feature_calculator_dep():
+    global SILVER_FEATURE_CALCULATOR
+    if SILVER_FEATURE_CALCULATOR is None:
+        SILVER_FEATURE_CALCULATOR = get_silver_feature_calculator()
+    return SILVER_FEATURE_CALCULATOR
+
+
+@app.get("/silver/features/latest")
+async def get_latest_silver_features():
+    """Get latest calculated silver features"""
+    try:
+        feature_calculator = get_silver_feature_calculator_dep()
+        if not feature_calculator:
+            raise HTTPException(status_code=503, detail="Silver feature calculator not initialized")
+        
+        features = feature_calculator.get_features_for_prediction()
+        if not features:
+            raise HTTPException(status_code=404, detail="Could not calculate features")
+        
+        return {
+            "success": True,
+            "timestamp": datetime.now().isoformat(),
+            "features_count": len(features),
+            "all_features": features,
+            "silver_price": features.get('silver_price_usd')
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/silver-price-history")
+async def get_silver_price_history(
+    range: str = Query("1y", description="Time range: '1m', '2m', '6m', '1y', '2y', '5y', 'all'"),
+    format: str = Query("json", description="Output format: 'json' or 'csv'")
+):
+    """Get historical silver prices from Supabase"""
+    try:
+        # Calculate start date based on range
+        end_date = datetime.now()
+        if range == "1m":
+            start_date = end_date - timedelta(days=30)
+        elif range == "2m":
+            start_date = end_date - timedelta(days=60)
+        elif range == "6m":
+            start_date = end_date - timedelta(days=180)
+        elif range == "1y":
+            start_date = end_date - timedelta(days=365)
+        elif range == "2y":
+            start_date = end_date - timedelta(days=730)
+        elif range == "5y":
+            start_date = end_date - timedelta(days=1825)
+        elif range == "all":
+            start_date = datetime(2000, 1, 1)
+        else:
+            return {"success": False, "error": f"Invalid range: {range}"}
+
+        # Fetch data from Supabase
+        feature_calculator = get_silver_feature_calculator_dep()
+        start_date_str = start_date.date().isoformat()
+        end_date_str = end_date.date().isoformat()
+        
+        response = feature_calculator.supabase.table("gold_silver_dataset") \
+            .select("date, silver_price_usd") \
+            .gte("date", start_date_str) \
+            .lte("date", end_date_str) \
+            .order("date", desc=False) \
+            .execute()
+        
+        if not response.data:
+            return {
+                "success": False,
+                "error": "No historical data found",
+                "range": range,
+                "start_date": start_date_str,
+                "end_date": end_date_str
+            }
+        
+        history = [{"date": r["date"], "price": float(r["silver_price_usd"])} for r in response.data]
+        prices = [h["price"] for h in history if h["price"] > 0]
+
+        stats = {}
+        if prices:
+            stats = {
+                "current_price": prices[-1],
+                "min_price": min(prices),
+                "max_price": max(prices),
+                "avg_price": sum(prices)/len(prices),
+                "price_change": prices[-1]-prices[0],
+                "percent_change": ((prices[-1]-prices[0])/prices[0]*100) if prices[0]>0 else 0
+            }
+        
+        result = {
+            "success": True,
+            "range": range,
+            "start_date": start_date_str,
+            "end_date": end_date_str,
+            "total_records": len(history),
+            "statistics": stats,
+            "data": history
+        }
+
+        # Return CSV if requested
+        if format.lower() == "csv":
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=["date", "price"])
+            writer.writeheader()
+            writer.writerows(history)
+            
+            return Response(
+                content=output.getvalue(),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename=silver_prices_{range}_{end_date_str}.csv"}
+            )
+        
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+from services.features import SilverFeatureCalculator
+
+SILVER_FEATURE_CALCULATOR = None
+
+def get_silver_feature_calculator():
+    global SILVER_FEATURE_CALCULATOR
+    if SILVER_FEATURE_CALCULATOR is None:
+        SILVER_FEATURE_CALCULATOR = SilverFeatureCalculator(get_supabase_client())
+    return SILVER_FEATURE_CALCULATOR
+
+
+@app.get("/features/latest")
+async def get_latest_silver_features():
+    """Get the latest calculated silver features"""
+    try:
+        feature_calculator = get_silver_feature_calculator()
+        features = feature_calculator.get_features_for_prediction()
+        return {
+            "success": True,
+            "timestamp": datetime.now().isoformat(),
+            "features": features
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict_silver")
+async def predict_silver():
+    feature_calculator = get_silver_feature_calculator()
+    model_loader = get_silver_model_loader()
+
+    features = feature_calculator.get_features_for_prediction()
+    model_features = {
+        k: features[k] for k in model_loader.feature_cols
+    }
+
+    prediction = model_loader.predict(model_features)
+
+    return {
+        "success": True,
+        "timestamp": datetime.now().isoformat(),
+        "features": model_features,
+        "prediction": prediction
+    }
 
 @app.get("/usd/health", response_model=USDHealthResponse)
 async def usd_health_check(
@@ -807,6 +975,8 @@ async def usd_test_endpoint(
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
+
+
 
 # ==================== RUN APPLICATION ====================
 

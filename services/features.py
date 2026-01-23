@@ -861,3 +861,153 @@ def get_feature_calculator(model_loader=None):
     if _feature_calculator is None:
         _feature_calculator = GoldFeatureCalculator(model_loader)
     return _feature_calculator
+
+############################################Silver
+# services/features.py
+
+class SilverFeatureCalculator(GoldFeatureCalculator):
+    """Silver feature calculator - same logic as Gold but primary asset is Silver"""
+    
+    def get_features_for_prediction(self) -> Dict:
+        """Fetch current prices, historical data, and calculate features for silver"""
+        # Fetch current prices
+        silver_price_data = self.fetch_silver_price()
+        gold_price_data = self.fetch_gold_price()
+        
+        current_prices = {
+            "silver_price_usd": silver_price_data['price'] if silver_price_data else 26.25,
+            "gold_price_usd": gold_price_data['price'] if gold_price_data else 2100.0
+        }
+        
+        # Fetch historical data from Supabase
+        df_hist = self.get_historical_data(days=200)
+        
+        # Calculate features
+        features = self.calculate_time_series_features(df_hist, current_prices=current_prices)
+        
+        # Add silver_price_usd explicitly
+        features['silver_price_usd'] = current_prices['silver_price_usd']
+        
+        # Prepare final features for model
+        return self.prepare_features_for_model(features)
+
+
+def get_silver_feature_calculator(model_loader=None) -> SilverFeatureCalculator:
+    return SilverFeatureCalculator(model_loader=model_loader)
+
+class SilverFeatureCalculator:
+    """Silver feature calculator - specific to silver model"""
+    
+    def __init__(self, supabase: Client = None):
+        self.supabase = supabase or create_client(
+            os.getenv("SUPABASE_URL"),
+            os.getenv("SUPABASE_KEY")
+        )
+        # Define only the features used by the silver model
+        self.feature_cols = [
+            'silver_return_5d', 'silver_return_10d', 'silver_return_30d',
+            'gold_silver_ratio_lag', 'dxy_return_30d', 'dxy_vol_30d',
+            'sp500_return_30d', 'sp500_vol_30d', 'vix_lag1', 'vix_lag7',
+            'crude_oil_return_30d'
+        ]
+
+    def fetch_silver_price(self) -> float:
+        """Fetch latest silver price from Supabase or Yahoo Finance"""
+        # Try Supabase first
+        try:
+            response = self.supabase.table("gold_silver_dataset")\
+                .select("date,silver_price_usd")\
+                .order("date", desc=True)\
+                .limit(1).execute()
+            if response.data and len(response.data) > 0:
+                return float(response.data[0]['silver_price_usd'])
+        except Exception as e:
+            print(f"⚠️ Supabase fetch error: {e}")
+        
+        # Fallback: Yahoo Finance
+        import yfinance as yf
+        try:
+            data = yf.download("SI=F", period="1d", progress=False)
+            if not data.empty:
+                return float(data['Close'].iloc[-1])
+        except Exception as e:
+            print(f"⚠️ Yahoo fetch error: {e}")
+        
+        return 25.0  # Default fallback
+
+    def get_features_for_prediction(self) -> dict:
+        """Calculate silver model features"""
+        # Load historical data
+        df = pd.DataFrame()
+        try:
+            start_date = (datetime.now() - timedelta(days=200)).date().isoformat()
+            response = self.supabase.table("gold_silver_dataset")\
+                .select("*")\
+                .gte("date", start_date)\
+                .order("date").execute()
+            if response.data:
+                df = pd.DataFrame(response.data)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+        except Exception as e:
+            print(f"⚠️ Supabase historical fetch error: {e}")
+
+        # Add current prices if needed
+        current_silver = self.fetch_silver_price()
+        if 'silver_price_usd' not in df.columns or df.empty:
+            df.loc[datetime.now()] = {'silver_price_usd': current_silver}
+
+        features = {}
+
+        # Compute lagged returns (5d, 10d, 30d)
+        for window in [5, 10, 30]:
+            if len(df) >= window + 1:
+                features[f'silver_return_{window}d'] = float(df['silver_price_usd'].pct_change(window).iloc[-1])
+            else:
+                features[f'silver_return_{window}d'] = 0.01
+
+        # gold_silver_ratio_lag
+        if 'gold_price_usd' in df.columns and 'silver_price_usd' in df.columns:
+            df['gold_silver_ratio'] = df['gold_price_usd'] / df['silver_price_usd']
+            features['gold_silver_ratio_lag'] = float(df['gold_silver_ratio'].shift(1).iloc[-1] or 80.0)
+        else:
+            features['gold_silver_ratio_lag'] = 80.0
+
+        # DXY return 30d, vol 30d
+        if 'dxy' in df.columns:
+            if len(df) >= 31:
+                features['dxy_return_30d'] = float(df['dxy'].pct_change(30).iloc[-1])
+                features['dxy_vol_30d'] = float(df['dxy'].pct_change().rolling(30).std().iloc[-1] or 0.01)
+            else:
+                features['dxy_return_30d'] = 0.0
+                features['dxy_vol_30d'] = 0.01
+        else:
+            features['dxy_return_30d'] = 0.0
+            features['dxy_vol_30d'] = 0.01
+
+        # S&P 500 return and vol 30d
+        if 'sp500' in df.columns:
+            if len(df) >= 31:
+                features['sp500_return_30d'] = float(df['sp500'].pct_change(30).iloc[-1])
+                features['sp500_vol_30d'] = float(df['sp500'].pct_change().rolling(30).std().iloc[-1] or 0.01)
+            else:
+                features['sp500_return_30d'] = 0.0
+                features['sp500_vol_30d'] = 0.01
+        else:
+            features['sp500_return_30d'] = 0.0
+            features['sp500_vol_30d'] = 0.01
+
+        # VIX lags
+        for lag in [1, 7]:
+            if 'vix' in df.columns and len(df) > lag:
+                features[f'vix_lag{lag}'] = float(df['vix'].shift(lag).iloc[-1])
+            else:
+                features[f'vix_lag{lag}'] = 16.5
+
+        # Crude oil return 30d
+        if 'crude_oil' in df.columns and len(df) >= 31:
+            features['crude_oil_return_30d'] = float(df['crude_oil'].pct_change(30).iloc[-1])
+        else:
+            features['crude_oil_return_30d'] = 0.01
+
+        return features
