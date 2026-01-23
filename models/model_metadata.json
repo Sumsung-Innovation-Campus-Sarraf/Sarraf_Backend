@@ -1,0 +1,76 @@
+{
+  "model_type": "LinearRegression",
+  "model_name": "Linear Regression",
+  "training_date": "2026-01-23 10:15:09",
+  "data_info": {
+    "train_samples": 2898,
+    "test_samples": 725,
+    "feature_count": 34,
+    "train_period": {
+      "start": "2016-02-22",
+      "end": "2024-01-28"
+    },
+    "test_period": {
+      "start": "2024-01-29",
+      "end": "2026-01-22"
+    }
+  },
+  "performance": {
+    "rmse": 0.6139527962744193,
+    "mae": 0.3056649771486557,
+    "r2": 0.9941178314442444,
+    "mape": 0.13186638045610555
+  },
+  "features": {
+    "count": 34,
+    "list": [
+      "eur_usd",
+      "brent_oil",
+      "dxy",
+      "lag_1",
+      "lag_2",
+      "lag_3",
+      "lag_5",
+      "lag_7",
+      "lag_10",
+      "lag_14",
+      "lag_30",
+      "ma_5",
+      "std_5",
+      "ma_10",
+      "std_10",
+      "ma_20",
+      "std_20",
+      "ma_50",
+      "std_50",
+      "eur_usd_lag_1",
+      "eur_usd_lag_2",
+      "eur_usd_lag_3",
+      "eur_usd_lag_5",
+      "brent_oil_lag_1",
+      "brent_oil_lag_2",
+      "brent_oil_lag_3",
+      "brent_oil_lag_5",
+      "dxy_lag_1",
+      "dxy_lag_2",
+      "dxy_lag_3",
+      "dxy_lag_5",
+      "day_of_week",
+      "month",
+      "quarter"
+    ],
+    "example_values": {
+      "eur_usd": 1.1123965978622437,
+      "brent_oil": 34.689998626708984,
+      "dxy": 97.37999725341795,
+      "lag_1": 158.85176489168262,
+      "lag_2": 158.85176489168262
+    }
+  },
+  "model_parameters": {
+    "copy_X": true,
+    "fit_intercept": true,
+    "n_jobs": null,
+    "positive": false
+  }
+}
