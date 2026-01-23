@@ -24,6 +24,17 @@ from services.usd_forecaster import USDForecaster
 # Load environment variables
 load_dotenv()
 
+from fastapi import FastAPI
+from routes import routes
+from core.middlewares import setup_middlewares
+
+app = FastAPI()
+app.include_router(routes.router)
+
+
+setup_middlewares(app)
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Gold and USD/DZD Forecast API",

@@ -10,22 +10,30 @@ def get_parallel_rates():
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
 
-        rates = {}
-        # Find the table rows
+        rates = {
+            "eur_dzd_parallel": None,
+            "usd_dzd_parallel": None
+        }
+
         table_rows = soup.select("table tr")
+
         for row in table_rows:
             cols = row.find_all("td")
-            if len(cols) >= 4:
+            if len(cols) >= 3:
                 currency_name = cols[0].get_text(strip=True)
                 achat = cols[1].get_text(strip=True).split()[0]  # buy
-                vente = cols[2].get_text(strip=True).split()[0]  # sell
 
                 if "Euro" in currency_name:
-                    rates["EUR"] = {"buy": float(achat), "sell": float(vente)}
+                    rates["eur_dzd_parallel"] = float(achat)
+
                 elif "Dollar US" in currency_name:
-                    rates["USD"] = {"buy": float(achat), "sell": float(vente)}
+                    rates["usd_dzd_parallel"] = float(achat)
 
         return rates
+
     except Exception as e:
         print("Error scraping eurodz:", e)
-        return {"EUR": None, "USD": None}
+        return {
+            "eur_dzd_parallel": None,
+            "usd_dzd_parallel": None
+        }
