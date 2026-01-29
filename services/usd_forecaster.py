@@ -1,239 +1,176 @@
-"""
-USD/DZD Forecaster Service
-Handles model loading and prediction
-"""
-
+import numpy as np
+from datetime import datetime
+from pathlib import Path
 import joblib
 import pickle
-import numpy as np
-import pandas as pd
-from typing import Dict, List, Optional, Any
-from pathlib import Path
-import os
+import json
+from typing import Dict, Optional
 import logging
-from .usd_data_fetcher import USDDataFetcher
 
 logger = logging.getLogger(__name__)
 
 class USDForecaster:
-    """Service for USD/DZD forecasting"""
+    """USD/DZD forecaster using USDDataFetcher"""
     
-    def __init__(self, data_fetcher: USDDataFetcher):
+    def __init__(self, data_fetcher=None):
         self.data_fetcher = data_fetcher
         self.model = None
-        self.scaler = None
-        self.feature_cols = None
-        self.metadata = None
-    
-    def load_models(self) -> bool:
-        """Load USD/DZD model components"""
+        self.scaler_X = None
+        self.scaler_y = None
+        self.feature_cols = [
+            'eur_usd', 'brent_oil', 'dxy', 'lag1', 'lag7', 'lag30',
+            'usd_dzd_official'
+        ]
+        self.metadata = {
+            "model_type": "Ridge",
+            "feature_count": 7,
+            "performance": {"rmse": 0.614, "mae": 0.496, "r2": 0.9996}
+        }
+        self.target_col = 'usd_dzd_parallel'
+
+    def load_models(self, model_path, scaler_X_path, scaler_y_path, metadata_path=None):
+        """Load model and scalers"""
         try:
-            # Get paths from environment variables
-            USD_MODEL_PATH = os.getenv("USD_MODEL_PATH", "./models/usd_dzd_model.pkl")
-            USD_SCALER_PATH = os.getenv("USD_SCALER_PATH", "./models/usd_dzd_scaler.pkl")
-            USD_FEATURES_PATH = os.getenv("USD_FEATURES_PATH", "./models/feature_columns.pkl")
-            
-            logger.info(f"Loading USD/DZD models from:")
-            logger.info(f"  Model: {USD_MODEL_PATH}")
-            logger.info(f"  Scaler: {USD_SCALER_PATH}")
-            logger.info(f"  Features: {USD_FEATURES_PATH}")
-            
             # Load model
-            if os.path.exists(USD_MODEL_PATH):
-                self.model = joblib.load(USD_MODEL_PATH)
-                logger.info(f"✅ USD/DZD model loaded from {USD_MODEL_PATH}")
+            if Path(model_path).exists():
+                self.model = joblib.load(model_path)
+                logger.info(f"✅ Model loaded from {model_path}")
             else:
-                logger.error(f"❌ USD/DZD model not found at {USD_MODEL_PATH}")
-                return False
-            
-            # Load scaler
-            if os.path.exists(USD_SCALER_PATH):
-                self.scaler = joblib.load(USD_SCALER_PATH)
-                logger.info(f"✅ USD/DZD scaler loaded from {USD_SCALER_PATH}")
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+
+            # Load scaler X
+            if Path(scaler_X_path).exists():
+                try:
+                    with open(scaler_X_path, 'rb') as f:
+                        self.scaler_X = pickle.load(f)
+                except Exception:
+                    self.scaler_X = joblib.load(scaler_X_path)
+                logger.info(f"✅ Scaler X loaded from {scaler_X_path}")
             else:
-                logger.error(f"❌ USD/DZD scaler not found at {USD_SCALER_PATH}")
-                return False
-            
-            # Load feature columns
-            if os.path.exists(USD_FEATURES_PATH):
-                with open(USD_FEATURES_PATH, 'rb') as f:
-                    self.feature_cols = pickle.load(f)
-                logger.info(f"✅ USD/DZD feature columns loaded: {len(self.feature_cols)} features")
+                raise FileNotFoundError(f"Scaler X file not found: {scaler_X_path}")
+
+            # Load scaler Y
+            if Path(scaler_y_path).exists():
+                try:
+                    with open(scaler_y_path, 'rb') as f:
+                        self.scaler_y = pickle.load(f)
+                except Exception:
+                    self.scaler_y = joblib.load(scaler_y_path)
+                logger.info(f"✅ Scaler Y loaded from {scaler_y_path}")
             else:
-                logger.error(f"❌ USD/DZD feature columns not found at {USD_FEATURES_PATH}")
-                return False
-            
-            # Load metadata if available
-            metadata_path = USD_FEATURES_PATH.replace('feature_columns.pkl', 'model_metadata.json')
-            if os.path.exists(metadata_path):
-                import json
+                raise FileNotFoundError(f"Scaler Y file not found: {scaler_y_path}")
+
+            # Load metadata if provided
+            if metadata_path and Path(metadata_path).exists():
                 with open(metadata_path, 'r') as f:
                     self.metadata = json.load(f)
-                logger.info(f"✅ USD/DZD metadata loaded")
-            
-            return True
-            
+                logger.info(f"✅ Metadata loaded from {metadata_path}")
+
+            return self.is_loaded()
         except Exception as e:
-            logger.error(f"❌ Error loading USD/DZD models: {e}")
-            return False
-    
-    def is_loaded(self) -> bool:
-        """Check if model components are loaded"""
-        return all([
-            self.model is not None,
-            self.scaler is not None,
-            self.feature_cols is not None
-        ])
-    
-    async def prepare_model_input(self, target_date) -> Dict:
-        """Prepare complete model input for USD/DZD prediction"""
-        # Step 1: Fetch historical data (last 60 days)
-        required_days = 60
-        start_date = target_date - pd.Timedelta(days=required_days)
+            logger.error(f"❌ Error loading models: {e}")
+            raise
+
+    def is_loaded(self):
+        """Check if all components are loaded"""
+        return all([self.model is not None, self.scaler_X is not None, self.scaler_y is not None])
+
+    def get_model_info(self):
+        """Get model information"""
+        if not self.is_loaded():
+            return {"error": "Model not loaded"}
         
-        historical_features = []
+        return {
+            "model_type": self.metadata.get("model_type", "Ridge"),
+            "feature_count": len(self.feature_cols),
+            "features": self.feature_cols,
+            "performance": self.metadata.get("performance", {}),
+            "target": self.target_col
+        }
+
+    async def forecast(self, target_date_str: str) -> Dict:
+        """
+        Fetch features via fetcher and make a prediction
         
-        # Fetch or calculate features for each historical date
-        current_date = start_date
-        while current_date <= target_date:
-            features = await self.data_fetcher.fetch_or_calculate_features(current_date)
-            historical_features.append(features)
-            current_date += pd.Timedelta(days=1)
+        Args:
+            target_date_str: Date string in format 'YYYY-MM-DD'
+            
+        Returns:
+            Dict with prediction results
+        """
+        if not self.is_loaded():
+            raise ValueError("Model not loaded. Call load_models() first.")
+
+        if not self.data_fetcher:
+            raise ValueError("Data fetcher not initialized")
+
+        # Convert string to datetime
+        target_date = datetime.strptime(target_date_str, '%Y-%m-%d')
         
-        # Convert to DataFrame
-        features_df = pd.DataFrame(historical_features)
+        logger.info(f"📊 Forecasting for {target_date_str}")
+
+        # Fetch features (fetcher handles lag calculation + external fallback)
+        features = await self.data_fetcher.fetch_or_calculate_features(target_date)
         
-        # Step 2: Calculate lag features
-        features_df = self.data_fetcher.calculate_lag_features(features_df, target_date)
-        
-        # Step 3: Get the row for target date
-        target_date_str = target_date.strftime('%Y-%m-%d')
-        target_row = features_df[features_df['date'] == target_date_str]
-        
-        if target_row.empty:
-            raise ValueError(f"No data found for {target_date_str}")
-        
-        # Step 4: Prepare features in exact order expected by model
-        if not self.feature_cols:
-            raise ValueError("USD/DZD model feature columns not loaded")
-        
-        model_input = {}
+        logger.info(f"📋 Features fetched: {list(features.keys())}")
+
+        # Prepare feature array in correct order
+        X = []
         missing_features = []
         
         for feature in self.feature_cols:
-            if feature in target_row.columns:
-                value = target_row[feature].iloc[0]
-                if pd.isna(value):
-                    missing_features.append(feature)
-                else:
-                    model_input[feature] = value
-            else:
+            value = features.get(feature)
+            if value is None or (isinstance(value, float) and np.isnan(value)):
                 missing_features.append(feature)
+                # Use defaults for missing features
+                defaults = {
+                    'eur_usd': 1.08,
+                    'brent_oil': 80.0,
+                    'dxy': 100.0,
+                    'lag1': 150.0,
+                    'lag7': 150.0,
+                    'lag30': 150.0,
+                    'usd_dzd_official': 150.0
+                }
+                value = defaults.get(feature, 0.0)
+            X.append(float(value))
         
         if missing_features:
-            logger.warning(f"Missing features: {missing_features}")
-            # Try to fill with reasonable defaults
-            for feature in missing_features:
-                if feature.startswith('lag_'):
-                    # For lag features, use current value as approximation
-                    model_input[feature] = target_row['usd_dzd_parallel'].iloc[0] if 'usd_dzd_parallel' in target_row.columns else 240.0
-                elif feature.startswith('ma_') or feature.startswith('std_'):
-                    # For moving stats, use current value
-                    model_input[feature] = target_row['usd_dzd_parallel'].iloc[0] if 'usd_dzd_parallel' in target_row.columns else 240.0
-                elif 'eur_usd' in feature:
-                    model_input[feature] = 1.08  # Default EUR/USD
-                elif 'brent_oil' in feature:
-                    model_input[feature] = 80.0  # Default Brent
-                elif 'dxy' in feature:
-                    model_input[feature] = 100.0  # Default DXY
-                elif feature in ['day_of_week', 'month', 'quarter']:
-                    # Use actual date features
-                    if feature == 'day_of_week':
-                        model_input[feature] = target_date.weekday()
-                    elif feature == 'month':
-                        model_input[feature] = target_date.month
-                    elif feature == 'quarter':
-                        model_input[feature] = (target_date.month - 1) // 3 + 1
-                else:
-                    model_input[feature] = 0.0
+            logger.warning(f"⚠️ Missing features (using defaults): {missing_features}")
         
-        return model_input
-    
-    async def forecast(self, target_date, use_cached: bool = True) -> Dict:
-        """Make a USD/DZD forecast"""
-        if not self.is_loaded():
-            raise ValueError("USD/DZD model components not loaded")
-        
-        # Prepare model input
-        model_input = await self.prepare_model_input(target_date)
-        
-        # Create feature array in correct order
-        feature_values = []
-        for feature in self.feature_cols:
-            if feature in model_input:
-                feature_values.append(model_input[feature])
-            else:
-                feature_values.append(0.0)
-        
-        # Convert to numpy array and reshape
-        X = np.array(feature_values).reshape(1, -1)
-        
+        X = np.array([X])
+        logger.info(f"🔢 Feature vector shape: {X.shape}, values: {X[0]}")
+
         # Scale features
-        X_scaled = self.scaler.transform(X)
+        X_scaled = self.scaler_X.transform(X)
+        logger.info(f"📏 Scaled features: {X_scaled[0]}")
+
+        # Predict and inverse scale
+        y_pred_scaled = self.model.predict(X_scaled)[0]
+        y_pred = self.scaler_y.inverse_transform([[y_pred_scaled]])[0][0]
         
-        # Make prediction
-        prediction = self.model.predict(X_scaled)[0]
+        logger.info(f"🎯 Prediction: {y_pred:.4f} (scaled: {y_pred_scaled:.4f})")
+
+        # Build result
+        current_rate = features.get('usd_dzd_parallel')
+        rmse = self.metadata.get('performance', {}).get('rmse', 0.614)
         
-        # Get current rate
-        current_rate = model_input.get('usd_dzd_parallel', 240.0)
-        expected_change = prediction - current_rate
-        
-        # Calculate confidence interval
-        rmse = self.metadata.get('performance', {}).get('rmse', 0.6140) if self.metadata else 0.6140
-        confidence_interval = {
-            "lower": float(prediction - 1.96 * rmse),
-            "upper": float(prediction + 1.96 * rmse),
+        ci = {
+            "lower": float(y_pred - 1.96 * rmse),
+            "upper": float(y_pred + 1.96 * rmse),
             "confidence_level": 0.95
         }
-        
-        return {
-            "forecast": float(prediction),
-            "current_rate": float(current_rate),
-            "expected_change": float(expected_change),
-            "confidence_interval": confidence_interval,
-            "model_input": model_input,
-            "data_source": "cached" if use_cached else "calculated"
+
+        result = {
+            "predicted_rate": float(y_pred),
+            "confidence_interval": ci,
+            "features_used": self.feature_cols,
+            "rmse": float(rmse)
         }
-    
-    def get_model_info(self) -> Dict:
-        """Get information about the loaded model"""
-        if not self.is_loaded():
-            return {}
-        
-        info = {
-            "model_type": type(self.model).__name__,
-            "feature_count": len(self.feature_cols),
-            "feature_columns": self.feature_cols,
-            "is_loaded": True
-        }
-        
-        # Add metadata if available
-        if self.metadata:
-            info.update({
-                "training_date": self.metadata.get('training_date'),
-                "performance": self.metadata.get('performance', {}),
-                "data_info": self.metadata.get('data_info', {})
-            })
-        
-        # Add coefficients if available
-        if hasattr(self.model, 'coef_'):
-            info["has_coefficients"] = True
-            if len(self.model.coef_) == len(self.feature_cols):
-                coefs = list(zip(self.feature_cols, self.model.coef_))
-                coefs.sort(key=lambda x: abs(x[1]), reverse=True)
-                info["top_coefficients"] = [
-                    {"feature": feature, "coefficient": float(coef)} 
-                    for feature, coef in coefs[:10]
-                ]
-        
-        return info
+
+        if current_rate:
+            result["current_rate"] = float(current_rate)
+            result["expected_change"] = float(y_pred - current_rate)
+            result["percent_change"] = float((y_pred - current_rate) / current_rate * 100)
+
+        return result

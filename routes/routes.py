@@ -13,6 +13,8 @@ from services.future import forecast_next_days
 from fastapi import APIRouter, Query
 from datetime import datetime
 
+from services.usd import usd_forecast_logic, usd_history_logic
+
 router = APIRouter(prefix="", tags=["Rates"])
 
 
@@ -29,8 +31,15 @@ def get_forecast(currency: str = Query("EUR", description="Devise à convertir: 
         return {"status": "error", "message": "Currency must be EUR or USD."}
 
     history = get_historical_euro()  
+  
 
     forecast = forecast_next_days()  # Déjà gère EUR/DZD Parallel
+
+    # forecaster = get_usd_forecaster()
+    # data_fetcher = get_usd_data_fetcher()
+    
+    # history = usd_history_logic(data_fetcher, rate_type="both")
+    # forecast = usd_forecast_logic(forecaster, datetime.today().strftime("%Y-%m-%d"))
 
     return {
         "status": "success",

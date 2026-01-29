@@ -690,47 +690,12 @@ class GoldFeatureCalculator:
             logger.error(f"❌ Error saving to Supabase: {e}")
             return False
     def get_features_for_prediction(self) -> Dict:
-        """MAIN METHOD: Get features for model prediction"""
+        """MAIN METHOD: Get features for model prediction - WITH LOCAL SAVE FOR INPUTS"""
         try:
             today = datetime.now().date().isoformat()
             
-            # 1. Check if data exists in Supabase
-            if self.check_supabase_data(today):
-                logger.info(f"✅ Loading features from Supabase for {today}")
-                
-                # Get data from Supabase
-                response = self.supabase.table("gold_silver_dataset") \
-                    .select("*") \
-                    .eq("date", today) \
-                    .execute()
-                
-                if response.data:
-                    # Get base features from database
-                    base_features = response.data[0]
-                    
-                    # Convert to proper types
-                    features = {}
-                    for key, value in base_features.items():
-                        if value is None:
-                            features[key] = None
-                        elif isinstance(value, bool):
-                            features[key] = bool(value)
-                        elif isinstance(value, (int, float)):
-                            if isinstance(value, float):
-                                features[key] = float(value)
-                            else:
-                                features[key] = int(value)
-                        else:
-                            features[key] = value
-                    
-                    # Prepare features for model
-                    model_features = self.prepare_features_for_model(features)
-                    
-                    logger.info(f"✅ Loaded and prepared {len(model_features)} features for model")
-                    return model_features
-            
-            # 2. If not in Supabase, fetch new data
-            logger.info(f"🔄 No data in Supabase for {today}, fetching new...")
+            # 1. ALWAYS fetch fresh input data first
+            logger.info(f"🔄 Always fetching fresh input data for {today}...")
             
             # Fetch gold price
             logger.info("1. Fetching gold price...")
@@ -750,10 +715,15 @@ class GoldFeatureCalculator:
             logger.info("4. Fetching economic indicators...")
             econ_data = self.fetch_economic_indicators()
             
-            # Create basic features
+            # Create basic features with FRESH inputs
             features = self._create_basic_features(gold_price, silver_price, market_data, econ_data)
             
-            # Get historical data for time-series calculations
+            # 2. SAVE INPUT VALUES LOCALLY (always)
+            logger.info("5. Saving input values locally...")
+            self._save_input_values_locally(today, features)
+            
+            # 3. Get historical data from Supabase (for calculations)
+            logger.info("6. Loading historical data from Supabase for time-series calculations...")
             historical_df = self.get_historical_data(days=200)
             
             # Add current prices for time-series calculations
@@ -772,28 +742,31 @@ class GoldFeatureCalculator:
             # Prepare features for model
             model_features = self.prepare_features_for_model(features)
             
-            # Save to Supabase
-            logger.info("6. Saving to Supabase...")
-            self.save_to_supabase(today, features)
+            # 4. Try to save to Supabase (but continue if it fails)
+            logger.info("7. Attempting to save to Supabase...")
+            try:
+                success = self.save_to_supabase(today, features)
+                if success:
+                    logger.info(f"✅ Successfully saved to Supabase for {today}")
+                else:
+                    logger.warning(f"⚠️ Failed to save to Supabase, but data saved locally")
+            except Exception as supabase_error:
+                logger.warning(f"⚠️ Supabase error: {supabase_error}")
+                logger.info("⚠️ Data saved locally only")
             
-            logger.info(f"✅ Calculated and saved {len(model_features)} features for model")
-
-                # DEBUG: Show what we're returning
+            # Debug info
             print(f"\n🔍 FEATURE CALCULATOR DEBUG:")
             print(f"Returning {len(model_features)} features")
             print("First 20 features being returned:")
             for i, (key, value) in enumerate(list(model_features.items())[:20]):
                 print(f"  {i+1:2d}. {key}: {value} (type: {type(value).__name__})")
-        
+            
             return model_features
-        
-
             
         except Exception as e:
             logger.error(f"❌ Error in get_features_for_prediction: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            # Return default features in case of error
             return self._create_default_features()
     
     def _create_basic_features(self, gold_price: float, silver_price: float, 
@@ -865,149 +838,280 @@ def get_feature_calculator(model_loader=None):
 ############################################Silver
 # services/features.py
 
-class SilverFeatureCalculator(GoldFeatureCalculator):
-    """Silver feature calculator - same logic as Gold but primary asset is Silver"""
-    
-    def get_features_for_prediction(self) -> Dict:
-        """Fetch current prices, historical data, and calculate features for silver"""
-        # Fetch current prices
-        silver_price_data = self.fetch_silver_price()
-        gold_price_data = self.fetch_gold_price()
-        
-        current_prices = {
-            "silver_price_usd": silver_price_data['price'] if silver_price_data else 26.25,
-            "gold_price_usd": gold_price_data['price'] if gold_price_data else 2100.0
-        }
-        
-        # Fetch historical data from Supabase
-        df_hist = self.get_historical_data(days=200)
-        
-        # Calculate features
-        features = self.calculate_time_series_features(df_hist, current_prices=current_prices)
-        
-        # Add silver_price_usd explicitly
-        features['silver_price_usd'] = current_prices['silver_price_usd']
-        
-        # Prepare final features for model
-        return self.prepare_features_for_model(features)
 
 
-def get_silver_feature_calculator(model_loader=None) -> SilverFeatureCalculator:
-    return SilverFeatureCalculator(model_loader=model_loader)
+"""
+Silver Feature Calculator - FIXED VERSION
+Remove the duplicate SilverFeatureCalculator class and use only this one
+"""
+
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+import yfinance as yf
+from typing import Dict, Optional
+import logging
+from supabase import Client
+import os
+
+logger = logging.getLogger(__name__)
 
 class SilverFeatureCalculator:
     """Silver feature calculator - specific to silver model"""
     
-    def __init__(self, supabase: Client = None):
-        self.supabase = supabase or create_client(
-            os.getenv("SUPABASE_URL"),
-            os.getenv("SUPABASE_KEY")
-        )
-        # Define only the features used by the silver model
+    def __init__(self, supabase: Client):
+        self.supabase = supabase
+        
+        # Define the features used by the silver model
+        # These should match what your silver model was trained with
         self.feature_cols = [
-            'silver_return_5d', 'silver_return_10d', 'silver_return_30d',
-            'gold_silver_ratio_lag', 'dxy_return_30d', 'dxy_vol_30d',
-            'sp500_return_30d', 'sp500_vol_30d', 'vix_lag1', 'vix_lag7',
+            'silver_return_5d', 
+            'silver_return_10d', 
+            'silver_return_30d',
+            'gold_silver_ratio_lag', 
+            'dxy_return_30d', 
+            'dxy_vol_30d',
+            'sp500_return_30d', 
+            'sp500_vol_30d', 
+            'vix_lag1', 
+            'vix_lag7',
             'crude_oil_return_30d'
         ]
+        
+        logger.info("✅ Silver Feature Calculator initialized")
+        logger.info(f"📋 Silver model expects {len(self.feature_cols)} features")
 
     def fetch_silver_price(self) -> float:
         """Fetch latest silver price from Supabase or Yahoo Finance"""
         # Try Supabase first
         try:
             response = self.supabase.table("gold_silver_dataset")\
-                .select("date,silver_price_usd")\
+                .select("date, silver_price_usd")\
                 .order("date", desc=True)\
-                .limit(1).execute()
+                .limit(1)\
+                .execute()
+            
             if response.data and len(response.data) > 0:
-                return float(response.data[0]['silver_price_usd'])
+                price = float(response.data[0]['silver_price_usd'])
+                logger.info(f"✅ Fetched silver price from Supabase: ${price:.2f}")
+                return price
         except Exception as e:
-            print(f"⚠️ Supabase fetch error: {e}")
+            logger.warning(f"⚠️ Supabase fetch error: {e}")
         
         # Fallback: Yahoo Finance
-        import yfinance as yf
         try:
             data = yf.download("SI=F", period="1d", progress=False)
             if not data.empty:
-                return float(data['Close'].iloc[-1])
+                price = float(data['Close'].iloc[-1])
+                logger.info(f"✅ Fetched silver price from Yahoo: ${price:.2f}")
+                return price
         except Exception as e:
-            print(f"⚠️ Yahoo fetch error: {e}")
+            logger.warning(f"⚠️ Yahoo fetch error: {e}")
         
+        logger.warning("⚠️ Using default silver price: $25.00")
         return 25.0  # Default fallback
 
-    def get_features_for_prediction(self) -> dict:
-        """Calculate silver model features"""
-        # Load historical data
-        df = pd.DataFrame()
+    def get_historical_data(self, days: int = 200) -> pd.DataFrame:
+        """Get historical data from Supabase"""
         try:
-            start_date = (datetime.now() - timedelta(days=200)).date().isoformat()
+            start_date = (datetime.now() - timedelta(days=days)).date().isoformat()
+            
+            logger.info(f"📊 Fetching silver historical data from {start_date}")
+            
             response = self.supabase.table("gold_silver_dataset")\
                 .select("*")\
                 .gte("date", start_date)\
-                .order("date").execute()
-            if response.data:
+                .order("date", desc=False)\
+                .execute()
+            
+            if response.data and len(response.data) > 0:
                 df = pd.DataFrame(response.data)
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
+                logger.info(f"📈 Loaded {len(df)} days of silver historical data")
+                return df
+            else:
+                logger.warning("⚠️ No historical data found in Supabase")
+                return pd.DataFrame()
         except Exception as e:
-            print(f"⚠️ Supabase historical fetch error: {e}")
+            logger.error(f"❌ Error fetching historical data: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return pd.DataFrame()
 
-        # Add current prices if needed
-        current_silver = self.fetch_silver_price()
-        if 'silver_price_usd' not in df.columns or df.empty:
-            df.loc[datetime.now()] = {'silver_price_usd': current_silver}
+    def get_features_for_prediction(self) -> Dict:
+        """Calculate silver model features"""
+        logger.info("🔧 Calculating silver features...")
+        
+        try:
+            # Load historical data
+            df = self.get_historical_data(days=200)
+            
+            # Get current silver price
+            current_silver = self.fetch_silver_price()
+            
+            features = {}
+            features['silver_price_usd'] = current_silver
+            
+            # If we have historical data, calculate features
+            if not df.empty:
+                logger.info(f"📊 Processing {len(df)} historical records")
+                
+                # Add current price to dataframe for calculations
+                if 'silver_price_usd' not in df.columns or pd.isna(df['silver_price_usd'].iloc[-1]):
+                    today_idx = datetime.now()
+                    df.loc[today_idx, 'silver_price_usd'] = current_silver
+                
+                # 1. Compute silver lagged returns (5d, 10d, 30d)
+                if 'silver_price_usd' in df.columns and len(df) > 1:
+                    logger.info("  📈 Calculating silver returns...")
+                    for window in [5, 10, 30]:
+                        if len(df) >= window + 1:
+                            ret = df['silver_price_usd'].pct_change(window).iloc[-1]
+                            features[f'silver_return_{window}d'] = float(ret) if not pd.isna(ret) else 0.01
+                            logger.info(f"    silver_return_{window}d: {features[f'silver_return_{window}d']:.4f}")
+                        else:
+                            features[f'silver_return_{window}d'] = 0.01
+                            logger.warning(f"    ⚠️ Not enough data for silver_return_{window}d, using default")
+                else:
+                    logger.warning("  ⚠️ No silver price data, using defaults for returns")
+                    for window in [5, 10, 30]:
+                        features[f'silver_return_{window}d'] = 0.01
 
-        features = {}
+                # 2. Gold-silver ratio lag
+                logger.info("  📊 Calculating gold-silver ratio...")
+                if 'gold_price_usd' in df.columns and 'silver_price_usd' in df.columns and len(df) > 1:
+                    df['gold_silver_ratio'] = df['gold_price_usd'] / df['silver_price_usd'].replace(0, np.nan)
+                    ratio_lag = df['gold_silver_ratio'].shift(1).iloc[-1]
+                    features['gold_silver_ratio_lag'] = float(ratio_lag) if not pd.isna(ratio_lag) else 80.0
+                    logger.info(f"    gold_silver_ratio_lag: {features['gold_silver_ratio_lag']:.2f}")
+                else:
+                    features['gold_silver_ratio_lag'] = 80.0
+                    logger.warning("    ⚠️ Using default gold_silver_ratio_lag: 80.0")
 
-        # Compute lagged returns (5d, 10d, 30d)
-        for window in [5, 10, 30]:
-            if len(df) >= window + 1:
-                features[f'silver_return_{window}d'] = float(df['silver_price_usd'].pct_change(window).iloc[-1])
+                # 3. DXY return 30d, vol 30d
+                logger.info("  💵 Calculating DXY features...")
+                if 'dxy' in df.columns and len(df) > 1:
+                    if len(df) >= 31:
+                        dxy_ret = df['dxy'].pct_change(30).iloc[-1]
+                        features['dxy_return_30d'] = float(dxy_ret) if not pd.isna(dxy_ret) else 0.0
+                        
+                        dxy_vol = df['dxy'].pct_change().rolling(30, min_periods=15).std().iloc[-1]
+                        features['dxy_vol_30d'] = float(dxy_vol) if not pd.isna(dxy_vol) else 0.01
+                        
+                        logger.info(f"    dxy_return_30d: {features['dxy_return_30d']:.4f}")
+                        logger.info(f"    dxy_vol_30d: {features['dxy_vol_30d']:.4f}")
+                    else:
+                        features['dxy_return_30d'] = 0.0
+                        features['dxy_vol_30d'] = 0.01
+                        logger.warning("    ⚠️ Not enough data for DXY 30d calculations")
+                else:
+                    features['dxy_return_30d'] = 0.0
+                    features['dxy_vol_30d'] = 0.01
+                    logger.warning("    ⚠️ No DXY data, using defaults")
+
+                # 4. S&P 500 return and vol 30d
+                logger.info("  📈 Calculating S&P 500 features...")
+                if 'sp500' in df.columns and len(df) > 1:
+                    if len(df) >= 31:
+                        sp_ret = df['sp500'].pct_change(30).iloc[-1]
+                        features['sp500_return_30d'] = float(sp_ret) if not pd.isna(sp_ret) else 0.0
+                        
+                        sp_vol = df['sp500'].pct_change().rolling(30, min_periods=15).std().iloc[-1]
+                        features['sp500_vol_30d'] = float(sp_vol) if not pd.isna(sp_vol) else 0.01
+                        
+                        logger.info(f"    sp500_return_30d: {features['sp500_return_30d']:.4f}")
+                        logger.info(f"    sp500_vol_30d: {features['sp500_vol_30d']:.4f}")
+                    else:
+                        features['sp500_return_30d'] = 0.0
+                        features['sp500_vol_30d'] = 0.01
+                        logger.warning("    ⚠️ Not enough data for S&P 500 30d calculations")
+                else:
+                    features['sp500_return_30d'] = 0.0
+                    features['sp500_vol_30d'] = 0.01
+                    logger.warning("    ⚠️ No S&P 500 data, using defaults")
+
+                # 5. VIX lags
+                logger.info("  📊 Calculating VIX lags...")
+                if 'vix' in df.columns and len(df) > 1:
+                    for lag in [1, 7]:
+                        if len(df) > lag:
+                            vix_lag = df['vix'].shift(lag).iloc[-1]
+                            features[f'vix_lag{lag}'] = float(vix_lag) if not pd.isna(vix_lag) else 16.5
+                            logger.info(f"    vix_lag{lag}: {features[f'vix_lag{lag}']:.2f}")
+                        else:
+                            features[f'vix_lag{lag}'] = 16.5
+                            logger.warning(f"    ⚠️ Not enough data for vix_lag{lag}")
+                else:
+                    features['vix_lag1'] = 16.5
+                    features['vix_lag7'] = 16.5
+                    logger.warning("    ⚠️ No VIX data, using defaults")
+
+                # 6. Crude oil return 30d
+                logger.info("  🛢️ Calculating crude oil features...")
+                if 'crude_oil' in df.columns and len(df) >= 31:
+                    oil_ret = df['crude_oil'].pct_change(30).iloc[-1]
+                    features['crude_oil_return_30d'] = float(oil_ret) if not pd.isna(oil_ret) else 0.01
+                    logger.info(f"    crude_oil_return_30d: {features['crude_oil_return_30d']:.4f}")
+                else:
+                    features['crude_oil_return_30d'] = 0.01
+                    logger.warning("    ⚠️ Not enough crude oil data, using default")
+                    
             else:
-                features[f'silver_return_{window}d'] = 0.01
+                # No historical data, use all defaults
+                logger.warning("⚠️ No historical data available, using all defaults")
+                features = self._get_default_features()
+                features['silver_price_usd'] = current_silver
 
-        # gold_silver_ratio_lag
-        if 'gold_price_usd' in df.columns and 'silver_price_usd' in df.columns:
-            df['gold_silver_ratio'] = df['gold_price_usd'] / df['silver_price_usd']
-            features['gold_silver_ratio_lag'] = float(df['gold_silver_ratio'].shift(1).iloc[-1] or 80.0)
-        else:
-            features['gold_silver_ratio_lag'] = 80.0
+            # Validate we have all required features
+            for feature_name in self.feature_cols:
+                if feature_name not in features:
+                    logger.warning(f"⚠️ Missing feature {feature_name}, adding default")
+                    features[feature_name] = self._get_feature_default(feature_name)
 
-        # DXY return 30d, vol 30d
-        if 'dxy' in df.columns:
-            if len(df) >= 31:
-                features['dxy_return_30d'] = float(df['dxy'].pct_change(30).iloc[-1])
-                features['dxy_vol_30d'] = float(df['dxy'].pct_change().rolling(30).std().iloc[-1] or 0.01)
-            else:
-                features['dxy_return_30d'] = 0.0
-                features['dxy_vol_30d'] = 0.01
-        else:
-            features['dxy_return_30d'] = 0.0
-            features['dxy_vol_30d'] = 0.01
+            logger.info(f"✅ Calculated {len(features)} silver features")
+            logger.info(f"📋 Model-ready features: {list(features.keys())}")
+            
+            return features
+            
+        except Exception as e:
+            logger.error(f"❌ Error calculating silver features: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            
+            # Return defaults on error
+            features = self._get_default_features()
+            features['silver_price_usd'] = 25.0
+            return features
 
-        # S&P 500 return and vol 30d
-        if 'sp500' in df.columns:
-            if len(df) >= 31:
-                features['sp500_return_30d'] = float(df['sp500'].pct_change(30).iloc[-1])
-                features['sp500_vol_30d'] = float(df['sp500'].pct_change().rolling(30).std().iloc[-1] or 0.01)
-            else:
-                features['sp500_return_30d'] = 0.0
-                features['sp500_vol_30d'] = 0.01
-        else:
-            features['sp500_return_30d'] = 0.0
-            features['sp500_vol_30d'] = 0.01
+    def _get_default_features(self) -> Dict:
+        """Get default feature values"""
+        return {
+            'silver_return_5d': 0.01,
+            'silver_return_10d': 0.01,
+            'silver_return_30d': 0.01,
+            'gold_silver_ratio_lag': 80.0,
+            'dxy_return_30d': 0.0,
+            'dxy_vol_30d': 0.01,
+            'sp500_return_30d': 0.0,
+            'sp500_vol_30d': 0.01,
+            'vix_lag1': 16.5,
+            'vix_lag7': 16.5,
+            'crude_oil_return_30d': 0.01
+        }
 
-        # VIX lags
-        for lag in [1, 7]:
-            if 'vix' in df.columns and len(df) > lag:
-                features[f'vix_lag{lag}'] = float(df['vix'].shift(lag).iloc[-1])
-            else:
-                features[f'vix_lag{lag}'] = 16.5
+    def _get_feature_default(self, feature_name: str) -> float:
+        """Get default value for a specific feature"""
+        defaults = self._get_default_features()
+        return defaults.get(feature_name, 0.0)
 
-        # Crude oil return 30d
-        if 'crude_oil' in df.columns and len(df) >= 31:
-            features['crude_oil_return_30d'] = float(df['crude_oil'].pct_change(30).iloc[-1])
-        else:
-            features['crude_oil_return_30d'] = 0.01
 
-        return features
+def get_silver_feature_calculator(supabase: Client = None) -> SilverFeatureCalculator:
+    """Get or create silver feature calculator instance"""
+    if supabase is None:
+        from supabase import create_client
+        supabase = create_client(
+            os.getenv("SUPABASE_URL"),
+            os.getenv("SUPABASE_KEY")
+        )
+    return SilverFeatureCalculator(supabase=supabase)
